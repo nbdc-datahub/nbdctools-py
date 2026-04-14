@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.0.0
+## 1.0.1
 
 - Initial Python package release.
 - Added R-backed `create_dataset` wrapper behavior.
