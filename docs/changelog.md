@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.2
+
+- Updated docs with better instructions.
+
 ## 1.0.1
 
 - Initial Python package release.

@@ -1,6 +1,6 @@
 [project]
 name = "nbdctools"
-version = "1.0.1"
+version = "1.0.2"
 description = "Python version of NBDCtools, a collection of tools for handling datasets in the NBDC DataHub."
 readme = { file = "README.md", content-type = "text/markdown" }
 authors = [
