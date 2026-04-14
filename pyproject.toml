@@ -1,0 +1,58 @@
+[project]
+name = "nbdctools"
+version = "1.0.0"
+description = "Python version of NBDCtools, a collection of tools for handling datasets in the NBDC DataHub."
+readme = { file = "README.md", content-type = "text/markdown" }
+authors = [
+    { name = "Le Zhang", email = "dairc.service@gmail.com" },
+    { name = "Janosch Linkersdoerfer", email = "linkersdoerfer@gmail.com" }
+]
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
+keywords = ["abcd", "nbdctools", "dataset", "data-analysis"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering",
+]
+requires-python = ">=3.11"
+dependencies = [
+    "polars>=1.39.3",
+    "rdata>=1.0.0",
+    "rds2py>=0.9.0",
+    "rpy2>=3.6.6",
+]
+
+[project.urls]
+Repository = "https://github.com/nbdc-datahub/nbdctools-py"
+Documentation = "https://software.nbdc-datahub.org/nbdctools-py/"
+"Bug Tracker" = "https://github.com/nbdc-datahub/nbdctools-py/issues"
+Changelog = "https://software.nbdc-datahub.org/nbdctools-py/changelog/"
+
+[build-system]
+requires = ["uv_build>=0.11.1,<0.12.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pandas>=3.0.1",
+    "pyarrow>=23.0.1",
+    "pytest>=9.0.2",
+]
+docs = [
+    "mkdocs>=1.6.1",
+    "mkdocs-material>=9.6.22",
+    "mkdocstrings[python]>=0.30.1",
+]
+
+[tool.pytest.ini_options]
+markers = [
+    "r_integration: tests requiring R backend integration",
+    "pure_integration: tests requiring local pure-python integration data",
+]

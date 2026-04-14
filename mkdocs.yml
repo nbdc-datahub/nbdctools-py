@@ -1,0 +1,83 @@
+site_name: nbdctools
+site_description: Python version of NBDCtools, a collection of tools for working with NBDC data.
+site_url: https://software.nbdc-datahub.org/nbdctools-py/
+repo_url: https://github.com/nbdc-datahub/nbdctools-py
+repo_name: nbdc-datahub/nbdctools-py
+
+theme:
+  name: material
+  language: en
+  logo: null
+  features:
+    - navigation.tabs
+    - navigation.tabs.sticky
+    - navigation.indexes
+    - content.code.copy
+    - search.suggest
+    - search.highlight
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  font:
+    text: Source Sans 3
+    code: JetBrains Mono
+  icon:
+    repo: fontawesome/brands/github
+
+nav:
+  - Get started:
+      - Overview: index.md
+      - Installation: installation.md
+      - Quickstart: quickstart.md
+  - Reference: api/reference.md
+  - Articles:
+      - R wrapper: guide/r_wrapper.md
+      - Pure Python: guide/pure_python.md
+      - Metadata Workflow: guide/metadata.md
+      - Benchmark: guide/benchmark.md
+      - Troubleshooting: guide/troubleshooting.md
+  - Changelog: changelog.md
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [src]
+          options:
+            show_source: false
+            show_root_heading: true
+            heading_level: 2
+
+markdown_extensions:
+  - admonition
+  - toc:
+      permalink: true
+  - pymdownx.highlight
+  - pymdownx.superfences
+  - pymdownx.inlinehilite
+  - pymdownx.tabbed:
+      alternate_style: true
+
+extra_css:
+  - stylesheets/pkgdown.css
+
+extra_javascript:
+  - javascripts/header-home-link.js
+
+extra:
+  generator: false
+
+strict: true
