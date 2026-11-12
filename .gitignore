@@ -214,3 +214,6 @@ __marimo__/
 *.Rproj.user/
 *.Rproj
 *.parquet
+
+.claude/
+Plans.md

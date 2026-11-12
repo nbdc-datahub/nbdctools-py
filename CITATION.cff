@@ -1,0 +1,33 @@
+cff-version: 1.2.0
+message: "If nbdctools is helpful to your research, please cite the paper below."
+title: nbdctools
+repository-code: "https://github.com/nbdc-datahub/nbdctools-py"
+url: "https://software.nbdc-datahub.org/nbdctools-py/"
+license: GPL-3.0-or-later
+authors:
+  - given-names: Le
+    family-names: Zhang
+  - given-names: Janosch
+    family-names: Linkersdörfer
+preferred-citation:
+  type: article
+  title: "NBDC Data Tools: Building Analysis-ready Datasets From ABCD and HBCD Releases in R and Python"
+  journal: bioRxiv
+  year: 2026
+  doi: "10.64898/2026.11.02.763757"
+  notes: Preprint
+  authors:
+    - given-names: Le
+      family-names: Zhang
+    - given-names: Biplabendu
+      family-names: Das
+    - given-names: Olivier
+      family-names: Celhay
+    - given-names: Calen J.
+      family-names: Smith
+    - given-names: Laura R.
+      family-names: Ziemer
+    - given-names: Anders M.
+      family-names: Dale
+    - given-names: Janosch
+      family-names: Linkersdörfer

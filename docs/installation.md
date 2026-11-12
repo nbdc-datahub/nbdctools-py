@@ -7,7 +7,6 @@
 - Tested with Python 3.11 and 3.13.
 - `pip` for package installation
 
-
 ## Install from PyPI
 
 ```bash
@@ -20,15 +19,15 @@ pip install nbdctools
 pip install "git+https://github.com/nbdc-datahub/nbdctools-py.git"
 ```
 
-## R-backed 
+## R-backed wrapper
 
 ### R packages
 
-If you want to use the R-backed `create_dataset` wrapper, which has 
+If you want to use the R-backed `create_dataset` wrapper, which has
 full parity with the R `create_dataset` behavior, you need:
 
 - System R available on `PATH`
-- R packages: `NBDCtools`, `NBDCtoolsData`
+- R packages: `NBDCtools`, `NBDCtoolsData`, and `arrow` (for the default `polars_sink` return mode)
 
 
 ### R Library Discovery (`R_LIBS_USER`)

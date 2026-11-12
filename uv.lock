@@ -498,10 +498,9 @@ wheels = [
 
 [[package]]
 name = "nbdctools"
-version = "0.1.2"
+version = "0.1.3"
 source = { editable = "." }
 dependencies = [
-    { name = "mkdocs" },
     { name = "polars" },
     { name = "rdata" },
     { name = "rds2py" },
@@ -522,7 +521,6 @@ docs = [
 
 [package.metadata]
 requires-dist = [
-    { name = "mkdocs", specifier = ">=1.6.1" },
     { name = "polars", specifier = ">=1.39.3" },
     { name = "rdata", specifier = ">=1.0.0" },
     { name = "rds2py", specifier = ">=0.9.0" },

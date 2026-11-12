@@ -1,6 +1,6 @@
 [project]
 name = "nbdctools"
-version = "1.0.3"
+version = "1.0.4"
 description = "Python version of NBDCtools, a collection of tools for handling datasets in the NBDC DataHub."
 readme = { file = "README.md", content-type = "text/markdown" }
 authors = [
@@ -34,6 +34,22 @@ Repository = "https://github.com/nbdc-datahub/nbdctools-py"
 Documentation = "https://software.nbdc-datahub.org/nbdctools-py/"
 "Bug Tracker" = "https://github.com/nbdc-datahub/nbdctools-py/issues"
 Changelog = "https://software.nbdc-datahub.org/nbdctools-py/changelog/"
+
+[tool.uv.build-backend]
+# The module root is otherwise packaged wholesale, so AI assistant scratch
+# files dropped inside it would ship to PyPI. Root-level ones are already
+# outside the backend's include list.
+source-exclude = [
+    "**/CLAUDE.md",
+    "**/AGENTS.md",
+    "**/Plans.md",
+    "**/spec.md",
+    "**/.claude",
+    "**/.cursor",
+    "**/.codegraph",
+    "**/.agents",
+    "**/.mcp.json",
+]
 
 [build-system]
 requires = ["uv_build>=0.11.1,<0.12.0"]

@@ -1,17 +1,29 @@
 # API Reference
 
-## Public Package API
+Everything below is importable directly from `nbdctools`:
 
-::: nbdctools
+```python
+from nbdctools import (
+    NBDCtoolsRError,
+    create_dataset,
+    create_dataset_py,
+    download_metadata,
+    load_metadata,
+)
+```
 
-## R-backed wrapper
+## Dataset creation
 
-::: nbdctools.r_wrapper
+::: nbdctools.create_dataset
 
-## Pure-Python and metadata utilities
+::: nbdctools.create_dataset_py
 
-::: nbdctools.pure_python
+## Metadata
+
+::: nbdctools.download_metadata
+
+::: nbdctools.load_metadata
 
 ## Exceptions
 
-::: nbdctools.exceptions
+::: nbdctools.NBDCtoolsRError
