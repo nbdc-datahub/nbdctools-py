@@ -1,20 +1,33 @@
 from __future__ import annotations
 
 import bz2
+import contextlib
+import ctypes
+import glob
 import gzip
 import io
 import json
 import lzma
+import os
+import re
 import shutil
 import tarfile
 import warnings
+import zlib
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 import polars as pl
-import rds2py
+
+# rds2py 0.10 prints a line for each optional package it does not find.
+with contextlib.redirect_stdout(io.StringIO()):
+    import rds2py
+    from rds2py.generics import _dispatcher
+    from rds2py.PyRdaReader import PyRdaParser, _RdsProcessorHelper
+    from rds2py.PyRdsReader import PyRdsParser
 
 
 # The r-universe data API (/NBDCtoolsData/data/<name>/rds) converts a dataset in
@@ -30,6 +43,22 @@ _DOWNLOAD_HEADERS = {
 
 # Leading bytes of the compressions R's save() and saveRDS() can write.
 _R_COMPRESSION = {b"\x1f\x8b\x08": gzip.open, b"BZh": bz2.open, b"\xfd7z": lzma.open}
+
+# Decompressors for an object in an installed package's lazy-load database, by the type
+# byte R writes in front of it (R_compress1 to R_compress3 in R's src/main/serialize.c).
+# R writes xz as a headerless LZMA2 stream at preset 6, which the reader has to be told.
+_LAZY_DATA_CODECS = {
+    b"Z": lambda: lzma.LZMADecompressor(lzma.FORMAT_RAW, filters=[{"id": lzma.FILTER_LZMA2, "preset": 6}]),
+    b"2": bz2.BZ2Decompressor,
+    b"1": zlib.decompressobj,
+    b"0": lambda: None,
+}
+
+# rds2py's converter of one parsed R object, which its file readers are built on.
+_R_OBJECT = _RdsProcessorHelper()
+
+# How R stores a missing logical or integer value.
+_R_NA_INTEGER = -(2**31)
 
 
 def _progress(enabled: bool, message: str) -> None:
@@ -71,22 +100,9 @@ def _fetch(url: str) -> bytes:
         return resp.read()
 
 
-def download_metadata(
-    type: str = "dds",
-    path: str | Path | None = None,
-    progress: bool = True,
-) -> Path:
-    """Download a metadata file from the NBDCtoolsData source package on r-universe.
-
-    The file is saved as a gzip-compressed ``.rda`` (by default ``lst_<type>.rda``),
-    which ``load_metadata`` reads.
-    """
-    _progress(progress, f"Starting metadata download for type={type!r}.")
-    meta_type = _normalize_meta_type(type)
-    out = _resolve_output_path(meta_type, path)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    _progress(progress, f"Resolved output path: {out}")
-
+def _download(meta_type: str, out: Path, progress: bool) -> Exception | None:
+    """Save ``lst_<type>`` from the NBDCtoolsData source package on r-universe, or return why not."""
+    _progress(progress, f"Starting metadata download for type={meta_type!r}.")
     attempts = 2
     last_error: Exception | None = None
 
@@ -103,8 +119,7 @@ def download_metadata(
                 with _decompressed(member) as src, gzip.open(tmp, "wb", compresslevel=6) as dst:
                     shutil.copyfileobj(src, dst, 1 << 24)
             tmp.replace(out)
-            _progress(progress, f"Saved lst_{meta_type} ({out.stat().st_size} bytes).")
-            return out
+            return None
         except HTTPError as err:
             last_error = RuntimeError(f"HTTP {err.code} while downloading {err.url}: {err.reason}")
             _progress(progress, f"Download failed with HTTP {err.code}: {err.reason}")
@@ -113,85 +128,313 @@ def download_metadata(
             _progress(progress, f"Download attempt failed: {err}")
 
     _progress(progress, "All download attempts failed.")
-    raise RuntimeError(
-        "Failed to download metadata after 2 attempts. With R and NBDCtoolsData installed, "
-        f'saveRDS(NBDCtoolsData::lst_{meta_type}, "lst_{meta_type}.rds") saves the same metadata.'
-    ) from last_error
+    return last_error
+
+
+def _r_library_globs() -> list[str]:
+    """Glob patterns for the R libraries of a standard R, renv, pak or conda setup.
+
+    pak has no library of its own and installs into R's default one. Patterns for
+    another operating system simply match nothing.
+    """
+    env = os.environ.get
+    home = os.path.expanduser("~")
+
+    def below(folder: str | None, *parts: str) -> list[str]:
+        return [os.path.join(glob.escape(folder), *parts)] if folder else []
+
+    def renv_libraries(roots: list[str]) -> list[str]:
+        # renv keeps a library in [<platform>/]R-<version>/<architecture> below its root.
+        return [os.path.join(root, *tail) for root in roots for tail in (("R-*", "*"), ("*", "R-*", "*"))]
+
+    renv_roots = below(env("RENV_PATHS_ROOT")) or [
+        *below(env("XDG_CACHE_HOME") or os.path.join(home, ".cache"), "R", "renv"),
+        *below(home, "Library", "Caches", "org.R-project.R", "R", "renv"),
+        *below(env("LOCALAPPDATA"), "R", "cache", "R", "renv"),
+        # Where renv kept its files before R 4.0, and still does while that folder exists.
+        *below(home, ".local", "share", "renv"),
+        *below(home, "Library", "Application Support", "renv"),
+        *below(env("LOCALAPPDATA"), "renv"),
+    ]
+    renv_caches = below(env("RENV_PATHS_CACHE")) or [os.path.join(root, "cache") for root in renv_roots]
+    renv_outside = below(env("RENV_PATHS_LIBRARY_ROOT")) + [os.path.join(root, "library") for root in renv_roots]
+    return [
+        *(
+            lib
+            for name in ("R_LIBS", "R_LIBS_USER", "R_LIBS_SITE")
+            for path in (env(name) or "").split(os.pathsep)
+            for lib in below(os.path.expanduser(path))
+        ),
+        # renv library of the project in the working directory.
+        *renv_libraries(below(env("RENV_PATHS_LIBRARY") or os.path.join("renv", "library"))),
+        # Default user libraries: Linux, macOS, macOS before R 4.1, Windows, Windows before R 4.2.
+        *below(home, "R", "*-library", "*"),
+        *below(home, "Library", "R", "*", "*", "library"),
+        *below(home, "Library", "R", "*", "library"),
+        *below(env("LOCALAPPDATA"), "R", "win-library", "*"),
+        *below(home, "Documents", "R", "win-library", "*"),
+        # The R installation in use, a conda environment, then system-wide libraries
+        # on Linux, macOS and Windows.
+        *below(env("R_HOME"), "library"),
+        *below(env("R_HOME"), "site-library"),
+        *below(env("CONDA_PREFIX"), "lib", "R", "library"),
+        "/usr/local/lib/R/site-library",
+        "/usr/local/lib/R/library",
+        "/usr/lib/R/site-library",
+        "/usr/lib/R/library",
+        "/usr/lib64/R/library",
+        "/opt/R/*/lib/R/library",
+        "/Library/Frameworks/R.framework/Versions/*/Resources/library",
+        "/opt/homebrew/lib/R/*/site-library",
+        "/usr/local/lib/R/*/site-library",
+        *below(env("ProgramFiles"), "R", "R-*", "library"),
+        # Libraries renv keeps outside a project, then its package cache, which
+        # holds a package in <package>/<version>/<hash>/.
+        *renv_libraries([os.path.join(root, "*") for root in renv_outside]),
+        *(
+            os.path.join(lib, "NBDCtoolsData", "*", "*")
+            for lib in renv_libraries([os.path.join(cache, "v*") for cache in renv_caches])
+        ),
+    ]
+
+
+def _installed_packages(libs: list[str]) -> list[tuple[tuple[int, ...], str, Path]]:
+    """Each NBDCtoolsData installed in ``libs``, as (comparable version, version, package folder)."""
+    found: dict[Path, tuple[tuple[int, ...], str, Path]] = {}
+    for lib in libs:
+        # R installs LazyData as a lazy-load database: Rdata.rdx indexes the objects in Rdata.rdb.
+        for rdx in glob.glob(os.path.join(lib, "NBDCtoolsData", "data", "Rdata.rdx")):
+            pkg = Path(rdx).parents[1]
+            try:
+                description = (pkg / "DESCRIPTION").read_text(encoding="utf-8", errors="replace")
+                version = re.search(r"^Version:\s*(\S+)", description, re.MULTILINE)[1]
+            except (OSError, TypeError):
+                continue
+            # A library can link to a copy another one holds, as renv's do to its cache.
+            found.setdefault(pkg.resolve(), (tuple(map(int, re.findall(r"\d+", version))), version, pkg))
+    return list(found.values())
+
+
+def _save_installed(
+    meta_type: str,
+    out: Path,
+    r_lib_paths: str | Path | Sequence[str | Path] | None,
+    progress: bool,
+) -> None:
+    """Save ``lst_<type>`` from the newest NBDCtoolsData installed in an R library."""
+    if r_lib_paths is None:
+        libs, where = _r_library_globs(), "the default R library locations"
+    else:
+        if isinstance(r_lib_paths, (str, os.PathLike)):
+            r_lib_paths = [r_lib_paths]
+        libs = [glob.escape(os.path.expanduser(lib)) for lib in r_lib_paths]
+        where = ", ".join(str(lib) for lib in r_lib_paths)
+
+    installs = _installed_packages(libs)
+    if not installs:
+        raise FileNotFoundError(
+            f"No installed NBDCtoolsData R package found in {where}. If it is installed, "
+            "pass the folders R prints for .libPaths() as r_lib_paths."
+        )
+    if len(installs) > 1:
+        _progress(progress, f"Found {len(installs)} installed copies of NBDCtoolsData:")
+        for _, version, pkg in installs:
+            _progress(progress, f"  {version} in {pkg.parent}")
+    _, version, pkg = max(installs, key=lambda install: install[0])
+    _progress(
+        progress,
+        f"Using NBDCtoolsData {version} from {pkg.parent}"
+        + (", the highest version." if len(installs) > 1 else "."),
+    )
+
+    name = f"lst_{meta_type}"
+    index = rds2py.read_rds(str(pkg / "data" / "Rdata.rdx"))
+    if name not in index["variables"]:
+        raise RuntimeError(f"NBDCtoolsData {version} at {pkg} has no {name}.")
+    offset, length = (int(n) for n in index["variables"][name])
+    # FALSE, TRUE (zlib), 2 (bzip2) or 3 (xz).
+    compressed = int(index["compressed"][0])
+
+    tmp = out.with_name(out.name + ".part")
+    with open(pkg / "data" / "Rdata.rdb", "rb") as rdb, gzip.open(tmp, "wb", compresslevel=6) as dst:
+        rdb.seek(offset)
+        # A compressed object follows its 4-byte length and, unless always zlib, a type byte.
+        header = rdb.read({0: 0, 1: 4}.get(compressed, 5))
+        decoder = _LAZY_DATA_CODECS[header[4:] or (b"1" if compressed else b"0")]()
+        remaining = length - len(header)
+        while remaining > 0:
+            # lst_dds expands about a hundredfold, so read it in small pieces.
+            chunk = rdb.read(min(remaining, 1 << 16))
+            if not chunk:
+                raise EOFError(f"{rdb.name} ends before {name} does.")
+            remaining -= len(chunk)
+            dst.write(decoder.decompress(chunk) if decoder else chunk)
+    tmp.replace(out)
+
+
+def download_metadata(
+    type: str = "dds",
+    path: str | Path | None = None,
+    progress: bool = True,
+    source: str = "auto",
+    r_lib_paths: str | Path | Sequence[str | Path] | None = None,
+) -> Path:
+    """Save a metadata file from the ``NBDCtoolsData`` R package.
+
+    The metadata is taken from the package on r-universe or, where r-universe
+    cannot be reached, from a copy of the package installed in an R library on
+    this machine. Neither needs R itself. The file is saved gzip-compressed, by
+    default as ``lst_<type>.rda``, and ``load_metadata`` reads it.
+
+    Parameters
+    ----------
+    type
+        ``"dds"`` for the data dictionaries, ``"levels"`` or ``"sessions"``.
+    path
+        File or folder to save to. Defaults to the working directory.
+    progress
+        Print what is being done, including which installed package is used.
+    source
+        Where to take the metadata from. ``"auto"`` tries r-universe, which
+        always has the latest release, and uses an installed package if the
+        download fails. ``"remote"`` uses r-universe only. ``"local"`` uses an
+        installed package only and makes no network request; use it offline,
+        or to work with the same metadata version as R does.
+    r_lib_paths
+        R library folders to look in for an installed ``NBDCtoolsData``, as R
+        prints them for ``.libPaths()``. By default the libraries of a standard
+        R, renv, pak or conda setup are searched. If several copies are found,
+        the highest version is used and all of them are reported. This does not
+        change ``source``: with ``"auto"``, r-universe is still tried first.
+
+    Returns
+    -------
+    Path
+        The saved file. From r-universe it is an R data file as ``save()``
+        writes it; from an installed package it holds the same object as
+        ``saveRDS()`` writes it, so R reads that one with ``readRDS()``.
+        ``load_metadata`` reads both.
+
+    Raises
+    ------
+    RuntimeError
+        If the download fails and no installed package can be used instead.
+    FileNotFoundError
+        If ``source="local"`` and no installed package is found.
+    ValueError
+        If ``type`` or ``source`` is not one of the values above.
+    """
+    meta_type = _normalize_meta_type(type)
+    if source not in {"auto", "remote", "local"}:
+        raise ValueError(f"Invalid source={source!r}. Valid values: auto, local, remote")
+    out = _resolve_output_path(meta_type, path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    _progress(progress, f"Resolved output path: {out}")
+
+    download_error: Exception | None = None
+    if source != "local":
+        download_error = _download(meta_type, out, progress)
+        if download_error is not None and source == "remote":
+            raise RuntimeError(
+                "Failed to download metadata after 2 attempts. With R and NBDCtoolsData installed, "
+                f'saveRDS(NBDCtoolsData::lst_{meta_type}, "lst_{meta_type}.rds") saves the same metadata.'
+            ) from download_error
+        if download_error is not None:
+            _progress(progress, "Looking for an installed NBDCtoolsData R package instead.")
+
+    if source == "local" or download_error is not None:
+        try:
+            _save_installed(meta_type, out, r_lib_paths, progress)
+        except FileNotFoundError as err:
+            if download_error is None:
+                raise
+            raise RuntimeError(f"Failed to download metadata ({download_error}). {err}") from download_error
+
+    _progress(progress, f"Saved lst_{meta_type} ({out.stat().st_size} bytes).")
+    return out
+
+
+def _column(name: str, col: Any) -> pl.Series:
+    """A data frame column as a Series typed after its R type, with missing values as nulls.
+
+    What rds2py makes of a column depends on its version and on the values: a missing
+    logical comes out as ``True`` or in an untyped array, a missing integer as NaN in a
+    float array, a column without any value untyped, and a factor as its integer codes.
+    """
+    rtype = col.get_rtype()
+    if rtype == "string":
+        return pl.Series(name, col.get_string_arr(), dtype=pl.String)
+    if rtype == "double":
+        # R's NA is one of the NaN values; is.na() is true for all of them.
+        return pl.Series(name, col.get_numeric_data(), dtype=pl.Float64).fill_nan(None)
+    if rtype in {"integer", "boolean"}:
+        values = pl.Series(name, col.get_numeric_data(), dtype=pl.Int32)
+        values = values.set(values == _R_NA_INTEGER, None)
+        if rtype == "boolean":
+            return values.cast(pl.Boolean)
+        if "levels" in col.get_attribute_names():
+            # A factor holds the position of each value among its levels, counted from 1.
+            levels = pl.Series(col.load_attribute_by_name("levels").get_string_arr(), dtype=pl.String)
+            return levels.gather(values - 1).alias(name)
+        return values
+    return pl.Series(name, _R_OBJECT._process_object(col)["data"])
+
+
+def _to_python(obj: Any) -> Any:
+    """Convert a parsed R object, building each data frame as soon as it is reached.
+
+    rds2py's file readers turn the whole file into Python lists before any
+    dataframe can be built from them, which for ``lst_dds`` takes well over a
+    gigabyte more than converting one column at a time.
+    """
+    if obj.get_rtype() != "vector":
+        return _dispatcher(_R_OBJECT._process_object(obj))
+
+    attributes = obj.get_attribute_names()
+    names = obj.load_attribute_by_name("names").get_string_arr() if "names" in attributes else None
+    items = (obj.load_vec_element(i) for i in range(obj.get_rsize()))
+    if "class" in attributes and "data.frame" in obj.load_attribute_by_name("class").get_string_arr():
+        return pl.DataFrame([_column(str(name), col) for name, col in zip(names, items)])
+    if names is None:
+        return [_to_python(item) for item in items]
+    return {name: _to_python(item) for name, item in zip(names, items)}
+
+
+def _trim_memory() -> None:
+    """Return freed memory to the operating system, which glibc otherwise keeps for the process."""
+    try:
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except (OSError, AttributeError):
+        pass  # No glibc: macOS, Windows, musl.
 
 
 def load_metadata(path: str | Path, progress: bool = True) -> Any:
-    """Load a metadata file (``.rda`` or ``.rds``) into nested dicts and Polars DataFrames."""
+    """Load a metadata file into nested dicts and Polars DataFrames.
+
+    Reads what ``download_metadata`` saves, and files written in R with
+    ``save()`` or ``saveRDS()``. The format is taken from the content of the
+    file, not from its extension.
+    """
     _progress(progress, f"Loading metadata from: {path}")
     with open(path, "rb") as f:
         # save() output starts with "RDX", saveRDS() output with "X".
         is_rda = _decompressed(f).read(2) == b"RD"
+    if is_rda:
+        parser = PyRdaParser(str(path))
+        (root,) = (parser.rda_object.get_object_by_index(i) for i in range(parser.get_object_count()))
+    else:
+        parser = PyRdsParser(str(path))
+        root = parser.root_object
+    _progress(progress, "File parsed; converting data frames to Polars DataFrames.")
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", message="RDS file contains an unknown class")
-        if is_rda:
-            (raw,) = rds2py.read_rda(str(path)).values()
-        else:
-            raw = rds2py.read_rds(str(path))
-    _progress(progress, "RDS payload loaded; converting nested payloads to Polars DataFrames.")
-    converted = _convert_rds2py_payload(raw)
+        converted = _to_python(root)
+    # ponytail: rds2py parses a file whole, 1.2 to 1.7 GB for lst_dds 7.0.0 against 0.4 GB of
+    # dataframes. Read the data frames straight from the stream if files outgrow memory.
+    del parser, root
+    _trim_memory()
     _progress(progress, "Metadata conversion complete.")
     return converted
-
-
-def _is_rds2py_df_payload(obj: Any) -> bool:
-    if not isinstance(obj, dict):
-        return False
-    if not {"type", "data", "attributes"}.issubset(obj.keys()):
-        return False
-
-    attributes = obj.get("attributes")
-    if not isinstance(attributes, dict):
-        return False
-
-    cls_attr = attributes.get("class")
-    if not isinstance(cls_attr, dict):
-        return False
-
-    classes = cls_attr.get("data")
-    return isinstance(classes, list) and "data.frame" in classes
-
-
-def _payload_to_polars_dataframe(obj: dict[str, Any]) -> pl.DataFrame:
-    attributes = obj["attributes"]
-    names_attr = attributes.get("names")
-    if not isinstance(names_attr, dict):
-        raise ValueError("Malformed rds2py payload: missing column names metadata.")
-
-    col_names = names_attr.get("data")
-    if not isinstance(col_names, list):
-        raise ValueError("Malformed rds2py payload: invalid column names metadata.")
-
-    cols = obj.get("data")
-    if not isinstance(cols, list):
-        raise ValueError("Malformed rds2py payload: invalid dataframe payload.")
-
-    values: dict[str, Any] = {}
-    for idx, col_name in enumerate(col_names):
-        if idx >= len(cols):
-            raise ValueError("Malformed rds2py payload: fewer columns than declared names.")
-        col_payload = cols[idx]
-        if not isinstance(col_payload, dict) or "data" not in col_payload:
-            raise ValueError("Malformed rds2py payload: invalid column payload.")
-        values[str(col_name)] = col_payload["data"]
-
-    return pl.DataFrame(values)
-
-
-def _convert_rds2py_payload(obj: Any) -> Any:
-    if _is_rds2py_df_payload(obj):
-        return _payload_to_polars_dataframe(obj)
-
-    if isinstance(obj, dict):
-        return {k: _convert_rds2py_payload(v) for k, v in obj.items()}
-
-    if isinstance(obj, list):
-        return [_convert_rds2py_payload(v) for v in obj]
-
-    return obj
 
 
 def _as_polars_dataframe(dd: Any) -> pl.DataFrame:
@@ -259,7 +502,12 @@ def _read_table_slice(
     if format == "parquet":
         return pl.read_parquet(file_path, columns=cols)
 
-    return pl.read_csv(file_path, separator="\t").select(cols)
+    # A TSV file carries no types, and a guess from its first rows fails on a column that
+    # starts with whole numbers and holds "13.0" or "T127" further down. Read text, as
+    # NBDCtools does, and leave the types to the data dictionary.
+    return pl.read_csv(
+        file_path, separator="\t", columns=cols, infer_schema=False, null_values=["n/a"]
+    ).select(cols)
 
 
 def _id_cols_in_order(dd: pl.DataFrame) -> list[str]:
@@ -400,6 +648,9 @@ def _apply_basic_types(data: pl.DataFrame, dd: pl.DataFrame, categ_to_factor: bo
         if col_name in data.columns:
             expr_map[col_name] = pl.col(col_name).cast(pl.Utf8, strict=False).alias(col_name)
 
+    # Columns read as text, from a TSV file, that the data dictionary types as numbers.
+    numbers_from_text: dict[str, pl.Expr] = {}
+
     if "type_data" in dd.columns:
         type_map = dict(zip(dd.get_column("name").to_list(), dd.get_column("type_data").to_list(), strict=False))
         for var, dtype in type_map.items():
@@ -409,6 +660,8 @@ def _apply_basic_types(data: pl.DataFrame, dd: pl.DataFrame, categ_to_factor: bo
                 expr_map[var] = pl.col(var).cast(pl.Int64, strict=False).alias(var)
             elif dtype == "double":
                 expr_map[var] = pl.col(var).cast(pl.Float64, strict=False).alias(var)
+            if dtype in {"integer", "double"} and data.schema[var] == pl.String:
+                numbers_from_text[var] = expr_map[var]
             elif dtype in {"character", "text", "time", "date", "timestamp"}:
                 expr_map[var] = pl.col(var).cast(pl.Utf8, strict=False).alias(var)
 
@@ -416,7 +669,23 @@ def _apply_basic_types(data: pl.DataFrame, dd: pl.DataFrame, categ_to_factor: bo
         level_map = dict(zip(dd.get_column("name").to_list(), dd.get_column("type_level").to_list(), strict=False))
         for var, level_type in level_map.items():
             if var in data.columns and level_type in {"nominal", "ordinal"}:
-                expr_map[var] = pl.col(var).cast(pl.Categorical, strict=False).alias(var)
+                numbers_from_text.pop(var, None)
+                # Go through text: Polars takes a number for the index of a category, not
+                # for its label, and a TSV file yields numbers where parquet holds text.
+                expr_map[var] = pl.col(var).cast(pl.String, strict=False).cast(pl.Categorical).alias(var)
+
+    if numbers_from_text:
+        # The casts turn text that is not a number into a missing value. Say so, as R does.
+        lost = data.select(
+            (pl.col(var).is_not_null() & number.is_null()).sum() for var, number in numbers_from_text.items()
+        ).row(0, named=True)
+        if any(lost.values()):
+            warnings.warn(
+                "Values that are not numbers were read as missing, for the number of rows in "
+                "brackets: " + ", ".join(f"{var} ({n})" for var, n in lost.items() if n) + ".",
+                UserWarning,
+                stacklevel=3,
+            )
 
     if expr_map:
         data = data.with_columns(list(expr_map.values()))

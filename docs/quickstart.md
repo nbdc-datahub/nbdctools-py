@@ -32,7 +32,8 @@ except NBDCtoolsRError as exc:
 ```python
 from nbdctools import create_dataset_py, load_metadata, download_metadata
 
-# Download the metadata once; it is saved as lst_dds.rda
+# Download the metadata once; it is saved as lst_dds.rda.
+# Without internet access, an installed NBDCtoolsData R package is used instead.
 download_metadata(type="dds")
 # Load the downloaded file into the session
 dds = load_metadata("lst_dds.rda")

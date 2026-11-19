@@ -93,3 +93,11 @@ the R default, `finer_add = "error"`, raises an error in this case instead.
 - An additional table with more than one row per identifier combination raises
   `ValueError`, rather than silently multiplying rows.
 - Type casting is applied from metadata (`type_data` and optional `type_level`).
+- With `categ_to_factor=True`, nominal and ordinal variables become categoricals whose
+  categories are the stored codes as text, for example `"1"`, `"2"`, `"777"`. The result is
+  the same for parquet and TSV input.
+- A TSV file carries no column types. They are taken from `type_data` in the data
+  dictionary, and `n/a` and empty fields are missing values, as in `NBDCtools`. A variable
+  without a type in the dictionary is returned as text.
+- Dates and timestamps are returned as text. From a TSV file they keep the notation used
+  in the file.

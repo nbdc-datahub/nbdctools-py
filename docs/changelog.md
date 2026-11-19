@@ -1,5 +1,66 @@
 # Changelog
 
+## 1.0.5
+
+- Fixed wrong categories from `create_dataset_py` when a nominal or ordinal
+  variable is stored as a number, which is the case for most of them in TSV
+  files. The numbers were taken for positions in an unrelated list of labels,
+  so a code `1` could come back as, for example, `ses-01A`, without any
+  warning. Categories are now the stored codes as text, the same for parquet
+  and TSV input. Results from parquet files, where NBDC stores these codes as
+  text, were correct and are unchanged. If you built datasets from TSV files
+  with the default `categ_to_factor=True`, please rebuild them.
+- `create_dataset_py` now works with Polars 2, which rejects the conversion
+  that caused the problem above instead of returning wrong categories.
+- Fixed `create_dataset_py` failing to read some TSV files with
+  `could not parse ... as dtype i64`. Column types were guessed from the first
+  rows, which went wrong for a column that starts with whole numbers and holds
+  a value such as `13.0` or `T127` further down. As in `NBDCtools`, the types
+  now come from the data dictionary, and `n/a` and empty fields are missing
+  values. With the ABCD 7.0 values written to TSV, 8 tables could not be read
+  before; now all 765 tables read and give the same values as the parquet
+  files. Timestamps are returned as text and keep the notation of the file.
+    - A value that the data dictionary types as a number but that is not one
+      becomes a missing value, and a warning names the variables concerned.
+    - A variable the data dictionary gives no type for is returned as text
+      when read from a TSV file.
+    - Only the requested columns of a TSV file are read.
+- `download_metadata` now works without access to r-universe. If the download
+  fails, it reads the metadata from an `NBDCtoolsData` R package installed on
+  the machine, so the same code runs on systems that block r-universe but ship
+  the R package. R itself is not needed.
+- Added `source` to `download_metadata`: `"auto"` (the default, r-universe
+  first, then an installed package), `"remote"` (r-universe only) and
+  `"local"` (an installed package only, with no network request).
+- Added `r_lib_paths` to `download_metadata` to name the R libraries to search.
+  By default the libraries of a standard R, renv, pak or conda setup are
+  searched. If several copies of `NBDCtoolsData` are found, the highest version
+  is used and all of them are listed.
+- `load_metadata` needs less memory. Loading `lst_dds` from `NBDCtoolsData`
+  7.0.0 peaked at about 3.1 GB and now peaks at about 2.6 GB. Afterwards the
+  process holds about 1 GB instead of about 1.8 GB. It is also slightly
+  faster.
+- `load_metadata` now returns what R holds. It was compared with R value for
+  value on all 24 metadata tables of `NBDCtoolsData` 7.0.0, which showed
+  three defects:
+    - Missing values (`NA`) are now nulls in every column. Before, a missing
+      text value was an empty string, a missing number was NaN and turned an
+      integer column into a float column, and a missing logical value was
+      `True` or left the column without a usable type, depending on the
+      installed `rds2py` version.
+    - A column keeps the type it has in R even if all its values are missing,
+      such as `label_es` in the HBCD data dictionaries.
+    - A factor column holds its labels. Before, it held the position of each
+      label, so `session_id` in `lst_sessions` for ABCD 6.0 read 1, 2, 3
+      instead of `ses-00S`, `ses-00A`, `ses-00M`.
+- `nbdctools` now requires `rds2py` 0.9.1 or later. Version 0.9.0 cannot tell
+  a missing text value from an empty one.
+- `import nbdctools` no longer prints a `Package '...' is not installed.`
+  line for each optional package of `rds2py` 0.10.
+- `load_metadata` now returns a Polars DataFrame for every R data frame.
+  Previously a plain `data.frame`, as opposed to a tibble, could come back as
+  a different type depending on which optional packages were installed.
+
 ## 1.0.4
 
 - Fixed `download_metadata(type="dds")`, which failed with HTTP 413 because
